@@ -15,7 +15,7 @@ jobs:
         run: curl --fail https://service.example.com/health
 ```
 
-Create a [service account](https://www.firezone.dev/kb/concepts/actors#service-accounts), grant it access to the required Resources through a Group and Policy, and store its token as the `FIREZONE_TOKEN` repository or environment secret. Use a dedicated service account with only the access the job needs. Run steps receiving this token only with trusted code.
+We recommend using a [service account](https://www.firezone.dev/kb/concepts/actors#service-accounts) for `FIREZONE_TOKEN` and keeping its access narrow.
 
 ## Supported runners
 
