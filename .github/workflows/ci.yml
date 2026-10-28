@@ -31,7 +31,9 @@ jobs:
         if: always() && steps.invalid-token.outcome != 'skipped'
         env:
           OUTCOME: ${{ steps.invalid-token.outcome }}
+          CLIENT_LOG: ${{ steps.invalid-token.outputs.log-path }}
         run: |
           test "$OUTCOME" = failure
+          grep -q "started logging" "$CLIENT_LOG"
           test -z "$(sudo find /run -maxdepth 1 -name 'setup-firezone-*' -print -quit)"
           ! ip link show tun-firezone
