@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: [main, codex/**]
+    branches: [main]
   pull_request:
 permissions:
   contents: read
@@ -28,7 +28,7 @@ jobs:
           token: invalid-token-for-setup-firezone-ci
           connect-timeout: 5s
       - name: Verify failed startup cleaned up
-        if: always()
+        if: always() && steps.invalid-token.outcome != 'skipped'
         env:
           OUTCOME: ${{ steps.invalid-token.outcome }}
         run: |

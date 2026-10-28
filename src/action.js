@@ -299,7 +299,7 @@ export async function start(state, { seconds, name }) {
       `${state.root}/client`,
       `--token-path=${state.root}/token`,
       `--firezone-id=${state.id}`,
-      `--firezone-name=${name.replaceAll("%", "%%")}`,
+      `--firezone-name=${name}`,
     ],
     { timeout: (seconds + 20) * 1000 },
   );
