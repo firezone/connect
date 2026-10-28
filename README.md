@@ -1,4 +1,4 @@
-# Setup Firezone
+# Connect to Firezone
 
 Connect a GitHub Actions job to your [Firezone Resources](https://www.firezone.dev/kb/concepts/resources).
 
@@ -7,7 +7,7 @@ jobs:
   integration-tests:
     runs-on: ubuntu-24.04
     steps:
-      - uses: firezone/setup-firezone@main # Pin a reviewed full commit SHA.
+      - uses: firezone/connect@main # Pin a reviewed full commit SHA.
         with:
           token: ${{ secrets.FIREZONE_TOKEN }}
 
