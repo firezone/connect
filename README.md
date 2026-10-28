@@ -1,6 +1,6 @@
 # Setup Firezone
 
-Connect a GitHub Actions job to your [Firezone Resources](https://www.firezone.dev/kb/user-guides/resources).
+Connect a GitHub Actions job to your [Firezone Resources](https://www.firezone.dev/kb/concepts/resources).
 The action downloads a verified headless client, waits for tunnel configuration, and stops the client at the end of the job.
 
 This action is under development. There is no `v1` release yet. Use a reviewed commit SHA while evaluating it.
@@ -18,7 +18,7 @@ jobs:
         run: curl --fail https://service.example.com/health
 ```
 
-Create a [service account](https://www.firezone.dev/kb/user-guides/actors#service-accounts), grant it access to the required Resources through a Group and Policy, and store its token as the `FIREZONE_TOKEN` repository or environment secret. Use a dedicated service account with only the access the job needs. Run steps receiving this token only with trusted code.
+Create a [service account](https://www.firezone.dev/kb/concepts/actors#service-accounts), grant it access to the required Resources through a Group and Policy, and store its token as the `FIREZONE_TOKEN` repository or environment secret. Use a dedicated service account with only the access the job needs. Run steps receiving this token only with trusted code.
 
 The action requires no GitHub API token or additional workflow permissions. The caller does not need to check out this repository.
 
