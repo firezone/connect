@@ -1,4 +1,5 @@
 import { run } from "./action.js";
+
 try {
   await run();
 } catch (error) {

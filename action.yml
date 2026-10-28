@@ -11,11 +11,12 @@ inputs:
   client-version:
     description: Exact headless client version. Defaults to the version pinned by this action.
     default: "1.5.14"
-  client-sha256:
-    description: Expected SHA-256 of the binary for an explicitly selected client version.
   connect-timeout:
     description: Maximum startup time, as a positive integer followed by s or m.
     default: 60s
+  log-filter:
+    description: Rust log filter for the headless client.
+    default: info
   name:
     description: Client display name. Defaults to the repository, job, run, and attempt.
 outputs:

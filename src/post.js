@@ -1,4 +1,5 @@
 import { post } from "./action.js";
+
 try {
   await post();
 } catch (error) {
