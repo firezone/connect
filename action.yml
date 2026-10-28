@@ -1,4 +1,4 @@
-name: Setup Firezone
+name: Connect to Firezone
 description: Connect to Firezone Resources for the duration of a GitHub Actions job.
 author: Firezone
 branding:
