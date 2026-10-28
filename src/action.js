@@ -1,0 +1,388 @@
+import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { createWriteStream } from "node:fs";
+import {
+  access,
+  appendFile,
+  mkdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import path from "node:path";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+
+export const pinned = {
+  version: "1.5.14",
+  sha256: {
+    x86_64: "61e8445a7d8550ff4cd7bac1904b13ad38ecbdd336b4db46f97087eae7865519",
+    aarch64: "3ca8df337b022149d48edeb3449f166cfa9585310a7e246e764b794b59f3fa86",
+  },
+};
+
+export function mask(secret) {
+  process.stdout.write(`::add-mask::${escapeCommand(secret)}\n`);
+}
+
+function escapeCommand(value) {
+  return String(value)
+    .replaceAll("%", "%25")
+    .replaceAll("\r", "%0D")
+    .replaceAll("\n", "%0A");
+}
+
+export async function fileCommand(file, key, value) {
+  if (!file) throw new Error("This action must run inside GitHub Actions.");
+  const delimiter = randomUUID();
+  await appendFile(file, `${key}<<${delimiter}\n${value}\n${delimiter}\n`);
+}
+
+export function inputs(env = process.env) {
+  const token = env.INPUT_TOKEN || "";
+  if (!token.trim() || /[\r\n\0]/.test(token))
+    throw new Error("A nonempty, single-line token is required.");
+  const version = env["INPUT_CLIENT-VERSION"] || pinned.version;
+  if (!/^\d+\.\d+\.\d+$/.test(version))
+    throw new Error(
+      "client-version must be an exact stable version, such as 1.5.14.",
+    );
+  const digest = env["INPUT_CLIENT-SHA256"] || "";
+  if (digest && !/^[a-fA-F0-9]{64}$/.test(digest))
+    throw new Error("client-sha256 must contain 64 hexadecimal characters.");
+  const timeout = env["INPUT_CONNECT-TIMEOUT"] || "60s";
+  if (!/^[1-9]\d*(s|m)$/.test(timeout))
+    throw new Error(
+      "connect-timeout must be a positive integer followed by s or m.",
+    );
+  const seconds =
+    Number(timeout.slice(0, -1)) * (timeout.endsWith("m") ? 60 : 1);
+  if (!Number.isSafeInteger(seconds) || seconds > 600)
+    throw new Error("connect-timeout must be at most 10m.");
+  const name =
+    env.INPUT_NAME ||
+    `${env.GITHUB_REPOSITORY}/${env.GITHUB_JOB}/${env.GITHUB_RUN_ID}/${env.GITHUB_RUN_ATTEMPT}`;
+  if (name.length > 255 || /[\r\n\0]/.test(name))
+    throw new Error("name must be a single line of at most 255 characters.");
+  return { token, version, digest: digest.toLowerCase(), seconds, name };
+}
+
+export function command(
+  program,
+  args,
+  { input, timeout = 30_000, allowFailure = false } = {},
+) {
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env };
+    delete env.INPUT_TOKEN;
+    delete env.FIREZONE_TOKEN;
+    const child = spawn(program, args, {
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), timeout);
+    child.stdout.on("data", (data) => {
+      stdout = (stdout + data).slice(-1_048_576);
+    });
+    child.stderr.on("data", (data) => {
+      stderr = (stderr + data).slice(-1_048_576);
+    });
+    child.stdin.on("error", () => {});
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      const result = { code, stdout: stdout.trim(), stderr: stderr.trim() };
+      if (code === 0 || allowFailure) resolve(result);
+      else
+        reject(
+          new Error(`${program} failed (${signal || code}): ${stderr.trim()}`),
+        );
+    });
+    child.stdin.end(input);
+  });
+}
+
+export async function preflight() {
+  if (
+    process.platform !== "linux" ||
+    !["x64", "arm64"].includes(process.arch) ||
+    process.env.RUNNER_ENVIRONMENT !== "github-hosted"
+  ) {
+    throw new Error(
+      "Only GitHub-hosted Ubuntu 24.04 x86-64 and ARM64 virtual machines are supported.",
+    );
+  }
+  const os = await readFile("/etc/os-release", "utf8");
+  if (!/^ID=ubuntu$/m.test(os) || !/^VERSION_ID="24\.04"$/m.test(os))
+    throw new Error("Ubuntu 24.04 is required.");
+  await access("/run/systemd/system");
+  await access("/dev/net/tun");
+  await command("sudo", ["-n", "true"]);
+  await command("systemctl", ["is-active", "--quiet", "systemd-resolved"]);
+  const links = JSON.parse(
+    (await command("ip", ["-json", "link", "show"])).stdout,
+  );
+  if (links.some((link) => link.ifname === "tun-firezone"))
+    throw new Error("A Firezone tunnel already exists on this runner.");
+  const existing = (
+    await command("systemctl", [
+      "list-units",
+      "--state=activating,active",
+      "--plain",
+      "--no-legend",
+      "firezone*.service",
+    ])
+  ).stdout;
+  if (existing)
+    throw new Error("A Firezone service is already running on this runner.");
+  const units = (
+    await command("systemctl", [
+      "list-units",
+      "--all",
+      "--plain",
+      "--no-legend",
+      "setup-firezone-*.service",
+    ])
+  ).stdout;
+  if (units)
+    throw new Error(
+      "This job already has a setup-firezone invocation. Only one is supported.",
+    );
+  return process.arch === "x64" ? "x86_64" : "aarch64";
+}
+
+export async function response(url, maxBytes) {
+  for (let redirects = 0; redirects <= 5; redirects++) {
+    const parsed = new URL(url);
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.username ||
+      parsed.password ||
+      !(
+        parsed.hostname === "github.com" ||
+        parsed.hostname.endsWith(".githubusercontent.com")
+      )
+    ) {
+      throw new Error(
+        "Refusing a download outside GitHub HTTPS release storage.",
+      );
+    }
+    const result = await fetch(url, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(120_000),
+    });
+    if ([301, 302, 303, 307, 308].includes(result.status)) {
+      await result.body?.cancel();
+      url = new URL(result.headers.get("location"), url).href;
+      continue;
+    }
+    if (!result.ok || !result.body)
+      throw new Error(`Release download failed with HTTP ${result.status}.`);
+    if (Number(result.headers.get("content-length")) > maxBytes) {
+      await result.body.cancel();
+      throw new Error("Release download exceeds the size limit.");
+    }
+    return result;
+  }
+  throw new Error("Too many release download redirects.");
+}
+
+export function releaseAsset(version, arch) {
+  if (!/^\d+\.\d+\.\d+$/.test(version) || !["x86_64", "aarch64"].includes(arch))
+    throw new Error("Invalid release asset.");
+  const name = `firezone-client-headless-linux_${version}_${arch}`;
+  return {
+    name,
+    url: `https://github.com/firezone/firezone/releases/download/headless-client-${version}/${name}`,
+  };
+}
+
+export async function downloadClient(version, arch, digest, destination) {
+  const { name, url } = releaseAsset(version, arch);
+  let expected =
+    digest || (version === pinned.version ? pinned.sha256[arch] : "");
+  if (!expected) {
+    const checksum = await response(`${url}.sha256sum.txt`, 4096);
+    let text = "";
+    for await (const chunk of Readable.fromWeb(checksum.body)) {
+      text += chunk.toString("utf8");
+      if (text.length > 4096)
+        throw new Error("Release checksum exceeds the size limit.");
+    }
+    const match = /^([a-fA-F0-9]{64})\s+\*?([^\r\n]+)\r?\n?$/.exec(text);
+    if (!match || match[2] !== name)
+      throw new Error("Release checksum does not match the selected asset.");
+    expected = match[1].toLowerCase();
+  }
+  const binary = await response(url, 128 * 1024 * 1024);
+  let bytes = 0;
+  const hash = createHash("sha256");
+  await pipeline(
+    Readable.fromWeb(binary.body),
+    new Transform({
+      transform(chunk, encoding, callback) {
+        bytes += chunk.length;
+        if (bytes > 128 * 1024 * 1024)
+          return callback(new Error("Client binary exceeds the size limit."));
+        hash.update(chunk);
+        callback(null, chunk);
+      },
+    }),
+    createWriteStream(destination, { flags: "wx", mode: 0o700 }),
+  );
+  if (hash.digest("hex") !== expected) {
+    await rm(destination, { force: true });
+    throw new Error("Client binary SHA-256 verification failed.");
+  }
+}
+
+export function instance(id = randomUUID(), temp = process.env.RUNNER_TEMP) {
+  if (
+    !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(
+      id,
+    ) ||
+    !temp ||
+    !path.isAbsolute(temp)
+  )
+    throw new Error("Invalid action runtime directory.");
+  const directory = path.join(temp, `setup-firezone-${id}`);
+  const root = `/run/setup-firezone-${id}`;
+  return {
+    id,
+    directory,
+    root,
+    unit: `setup-firezone-${id}.service`,
+    log: path.join(directory, "client.log"),
+  };
+}
+
+export async function prepare(state, binary, token) {
+  await command("sudo", ["-n", "install", "-d", "-m", "0700", state.root]);
+  await command("sudo", [
+    "-n",
+    "install",
+    "-m",
+    "0755",
+    binary,
+    `${state.root}/client`,
+  ]);
+  await command(
+    "sudo",
+    ["-n", "sh", "-c", 'umask 077; cat > "$1"', "sh", `${state.root}/token`],
+    { input: token },
+  );
+}
+
+export async function start(state, { seconds, name }) {
+  await command(
+    "sudo",
+    [
+      "-n",
+      "systemd-run",
+      "--quiet",
+      "--expand-environment=no",
+      `--unit=${state.unit}`,
+      "--property=Type=notify",
+      "--property=NotifyAccess=main",
+      `--property=TimeoutStartSec=${seconds}s`,
+      "--property=TimeoutStopSec=15s",
+      "--property=Restart=no",
+      "--property=RuntimeMaxSec=21600s",
+      `--property=StandardOutput=append:${state.log}`,
+      `--property=StandardError=append:${state.log}`,
+      "--setenv=RUST_LOG=info",
+      `${state.root}/client`,
+      `--token-path=${state.root}/token`,
+      `--firezone-id=${state.id}`,
+      `--firezone-name=${name.replaceAll("%", "%%")}`,
+    ],
+    { timeout: (seconds + 20) * 1000 },
+  );
+  await command("systemctl", ["is-active", "--quiet", state.unit]);
+}
+
+export async function cleanup(state, { checkAlive = false } = {}) {
+  const marker = path.join(state.directory, "cleaned");
+  if (
+    await access(marker).then(
+      () => true,
+      () => false,
+    )
+  )
+    return;
+  let unexpected = false;
+  if (checkAlive)
+    unexpected =
+      (
+        await command("systemctl", ["is-active", "--quiet", state.unit], {
+          allowFailure: true,
+        })
+      ).code !== 0;
+  const stopped = await command(
+    "sudo",
+    ["-n", "systemctl", "stop", state.unit],
+    { allowFailure: true },
+  );
+  const status = await command(
+    "systemctl",
+    ["show", state.unit, "--property=ActiveState", "--value"],
+    { allowFailure: true },
+  );
+  if (status.code === 0 && !["inactive", "failed", ""].includes(status.stdout))
+    throw new Error(`Could not stop Firezone: ${stopped.stderr}`);
+  await command("sudo", ["-n", "rm", "-rf", "--", state.root]);
+  await command("sudo", ["-n", "systemctl", "reset-failed", state.unit], {
+    allowFailure: true,
+  });
+  await rm(path.join(state.directory, "client"), { force: true });
+  await writeFile(marker, "", { mode: 0o600 });
+  if (unexpected)
+    throw new Error(
+      `Firezone stopped unexpectedly during the job. Inspect ${state.log}.`,
+    );
+}
+
+export async function run() {
+  const token = process.env.INPUT_TOKEN || "";
+  if (token) mask(token);
+  const config = inputs();
+  delete process.env.INPUT_TOKEN;
+  delete process.env.FIREZONE_TOKEN;
+  const arch = await preflight();
+  const state = instance();
+  await fileCommand(process.env.GITHUB_STATE, "instance", state.id);
+  await mkdir(state.directory, { mode: 0o700 });
+  await writeFile(state.log, "", { mode: 0o600 });
+  await fileCommand(process.env.GITHUB_OUTPUT, "log-path", state.log);
+  try {
+    const binary = path.join(state.directory, "client");
+    await downloadClient(config.version, arch, config.digest, binary);
+    await prepare(state, binary, config.token);
+    await start(state, config);
+    await fileCommand(process.env.GITHUB_STATE, "started", "true");
+    await fileCommand(
+      process.env.GITHUB_OUTPUT,
+      "client-version",
+      config.version,
+    );
+    console.log(
+      `Firezone ${config.version} is ready. Client logs: ${state.log}`,
+    );
+  } catch (error) {
+    await cleanup(state).catch((cleanupError) =>
+      console.error(cleanupError.message),
+    );
+    throw new Error(`${error.message} Client logs: ${state.log}`);
+  }
+}
+
+export async function post() {
+  if (!process.env.STATE_instance) return;
+  const state = instance(process.env.STATE_instance);
+  await cleanup(state, { checkAlive: process.env.STATE_started === "true" });
+}

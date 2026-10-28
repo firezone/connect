@@ -1,0 +1,30 @@
+name: Setup Firezone
+description: Connect to Firezone Resources for the duration of a GitHub Actions job.
+author: Firezone
+branding:
+  icon: shield
+  color: orange
+inputs:
+  token:
+    description: Firezone service account token.
+    required: true
+  client-version:
+    description: Exact headless client version. Defaults to the version pinned by this action.
+    default: "1.5.14"
+  client-sha256:
+    description: Expected SHA-256 of the binary for an explicitly selected client version.
+  connect-timeout:
+    description: Maximum startup time, as a positive integer followed by s or m.
+    default: 60s
+  name:
+    description: Client display name. Defaults to the repository, job, run, and attempt.
+outputs:
+  client-version:
+    description: Installed headless client version.
+  log-path:
+    description: Local client log file, retained until the runner is destroyed.
+runs:
+  using: node24
+  main: src/main.js
+  post: src/post.js
+  post-if: always()

@@ -1,0 +1,30 @@
+name: Resource connectivity
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  connect:
+    if: github.ref == 'refs/heads/main'
+    environment: integration
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check integration configuration
+        env:
+          TOKEN: ${{ secrets.FIREZONE_TOKEN }}
+          URL: ${{ vars.FIREZONE_TEST_URL }}
+        run: |
+          test -n "$TOKEN" || { echo 'Configure FIREZONE_TOKEN in the integration environment.'; exit 1; }
+          test -n "$URL" || { echo 'Configure FIREZONE_TEST_URL in the integration environment.'; exit 1; }
+      - uses: ./
+        with:
+          token: ${{ secrets.FIREZONE_TOKEN }}
+      - name: Reach private Resource
+        env:
+          URL: ${{ vars.FIREZONE_TEST_URL }}
+        run: curl --fail --silent --show-error --max-time 30 --output /dev/null "$URL"
